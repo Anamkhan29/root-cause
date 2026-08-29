@@ -1,0 +1,18 @@
+# Google Cloud — Gemini on Vertex AI (Gemini Enterprise Agent Platform)
+google-genai>=1.0.0
+
+# ClickHouse — direct driver (default engine) and MCP client (mcp engine)
+clickhouse-connect>=0.8.0
+mcp>=1.9.0
+
+# Web app (Cloud Run)
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
+# Config
+python-dotenv>=1.0.0
+
+# The MCP engine (ENGINE=mcp) also requires the ClickHouse MCP server itself:
+#   pip install mcp-clickhouse
+# It is not imported by this package (it runs as a subprocess), so it is listed
+# here as a comment rather than a hard dependency. Install it if you use --engine mcp.
