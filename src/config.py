@@ -1,8 +1,12 @@
-"""Central configuration, read from environment variables (see .env.example)."""
+"""Central configuration, read from environment variables."""
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @dataclass
@@ -16,12 +20,13 @@ class Config:
     ch_database: str
     table: str
 
-    # --- Google Cloud / Gemini (Gemini Enterprise Agent Platform / Vertex AI) ---
+    # --- Gemini ---
     gcp_project: str
     gcp_location: str
     gemini_model: str
+    gemini_api_key: str
 
-    # --- Data access engine: "direct" (clickhouse-connect) or "mcp" (ClickHouse MCP server) ---
+    # --- Data access engine ---
     engine: str
     mcp_command: str
 
@@ -38,6 +43,7 @@ class Config:
             gcp_project=os.getenv("GOOGLE_CLOUD_PROJECT", ""),
             gcp_location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
             engine=os.getenv("ENGINE", "direct"),
             mcp_command=os.getenv("MCP_COMMAND", "mcp-clickhouse"),
         )

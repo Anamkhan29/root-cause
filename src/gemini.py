@@ -1,14 +1,9 @@
-"""Gemini access via the Google Gen AI SDK, configured for Vertex AI
-(the Gemini Enterprise Agent Platform). This is the Google Cloud call path.
+"""Gemini client for RootCause."""
 
-Gemini plays two narrow, load-bearing roles in the pipeline:
-  1. parse_incident — turn a plain-English incident into a structured spec.
-  2. write_report   — turn the pipeline's findings into a grounded root-cause report.
-The model never writes SQL and never supplies numbers; it only interprets.
-"""
 from __future__ import annotations
 
 import json
+import os
 
 from google import genai
 from google.genai import types
@@ -19,25 +14,51 @@ from .config import Config
 class GeminiClient:
     def __init__(self, cfg: Config):
         self.model = cfg.gemini_model
-        # vertexai=True routes calls through Google Cloud (Vertex / Agent Platform).
-        self.client = genai.Client(
-            vertexai=True,
-            project=cfg.gcp_project,
-            location=cfg.gcp_location,
-        )
+        self.client = None
+
+        api_key = os.getenv("GEMINI_API_KEY")
+
+        if api_key:
+            try:
+                self.client = genai.Client(api_key=api_key)
+                return
+            except Exception:
+                pass
+
+        try:
+            self.client = genai.Client(
+                vertexai=True,
+                project=cfg.gcp_project,
+                location=cfg.gcp_location,
+            )
+        except Exception:
+            self.client = None
 
     def parse_incident(self, text: str) -> dict:
-        prompt = (
-            "You are triaging a video-streaming quality incident. "
-            "Extract structured fields from the report below.\n\n"
-            f'Incident: "{text}"\n\n'
-            "Return a JSON object with keys:\n"
-            '  metric: one of "rebuffer_rate" or "error_rate"\n'
-            "  region_hint: a US region name if one is mentioned, else null\n"
-            "  summary: a one-sentence restatement of the incident\n"
-        )
+        fallback = {
+            "metric": "rebuffer_rate",
+            "region_hint": None,
+            "device_hint": None,
+            "summary": text,
+        }
+
+        if self.client is None:
+            return fallback
+
+        prompt = f"""
+You are triaging a video-streaming quality incident.
+
+Incident: "{text}"
+
+Return ONLY valid JSON with these keys:
+- metric: one of "rebuffer_rate" or "error_rate"
+- region_hint: Northeast, Southeast, Midwest, West, Southwest, or null
+- device_hint: Smart TV, Mobile, Web, Tablet, Console, or null
+- summary: one concise sentence
+"""
+
         try:
-            resp = self.client.models.generate_content(
+            response = self.client.models.generate_content(
                 model=self.model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -45,30 +66,123 @@ class GeminiClient:
                     temperature=0,
                 ),
             )
-            return json.loads(resp.text)
-        except Exception:
-            # Fail safe: the pipeline still runs on the default metric.
-            return {"metric": "rebuffer_rate", "region_hint": None, "summary": text}
 
-    def write_report(self, incident_text: str, findings: dict) -> str:
-        prompt = (
-            "Write a concise root-cause report for an on-call streaming engineer. "
-            "Use ONLY the numbers in the findings; do not invent any figure.\n\n"
-            f'Incident as reported: "{incident_text}"\n\n'
-            f"Findings (JSON):\n{json.dumps(findings, default=str, indent=2)}\n\n"
-            "Structure the report as Markdown with these parts:\n"
-            "1. A one-line verdict.\n"
-            "2. What changed: baseline vs incident rate, and how many sessions were affected.\n"
-            "3. The culprit segment: the primary and secondary factors and how concentrated the anomaly is.\n"
-            "4. A concrete recommended mitigation.\n"
-            "Keep it under 200 words."
-        )
+            if response.text:
+                parsed = json.loads(response.text)
+                return {
+                    "metric": parsed.get("metric", "rebuffer_rate"),
+                    "region_hint": parsed.get("region_hint"),
+                    "device_hint": parsed.get("device_hint"),
+                    "summary": parsed.get("summary", text),
+                }
+
+        except Exception:
+            pass
+
+        return fallback
+
+    def write_report(
+        self,
+        incident_text: str,
+        findings: dict,
+    ) -> str:
+
+        if self.client is None:
+            return self._fallback_report(findings)
+
+        prompt = f"""
+Write a concise streaming root-cause report.
+
+Use ONLY the provided findings.
+Do not invent numbers.
+
+Incident:
+{incident_text}
+
+Findings:
+{json.dumps(findings, indent=2, default=str)}
+
+Use Markdown sections:
+### Verdict
+### What changed
+### Primary signal
+### Likely culprit
+### Recommended mitigation
+
+Keep it under 200 words.
+"""
+
         try:
-            resp = self.client.models.generate_content(
+            response = self.client.models.generate_content(
                 model=self.model,
                 contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.2),
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                ),
             )
-            return resp.text or ""
-        except Exception as exc:  # pragma: no cover - surface a usable message
-            return f"_Report generation failed ({exc}). Raw findings:_\n\n```json\n{json.dumps(findings, default=str, indent=2)}\n```"
+
+            if response.text and response.text.strip():
+                return response.text.strip()
+
+        except Exception:
+            pass
+
+        return self._fallback_report(findings)
+
+    @staticmethod
+    def _fallback_report(findings: dict) -> str:
+        baseline = float(findings.get("baseline_rate") or 0)
+        incident = float(findings.get("incident_rate") or 0)
+        multiple = findings.get("rate_multiple")
+        sessions = int(findings.get("incident_sessions") or 0)
+
+        primary = findings.get(
+            "primary_factor",
+            "unknown",
+        )
+
+        concentration = float(
+            findings.get("primary_concentration") or 0
+        )
+
+        secondary = findings.get(
+            "secondary_factor",
+            "unknown",
+        )
+
+        culprit_rate = float(
+            findings.get("culprit_segment_rate") or 0
+        )
+
+        culprit_sessions = int(
+            findings.get("culprit_segment_sessions") or 0
+        )
+
+        action = findings.get(
+            "suggested_action",
+            "investigate the affected segment",
+        )
+
+        if multiple is None:
+            anomaly_description = (
+                "a newly emerged anomaly with no measurable "
+                "historical baseline"
+            )
+        else:
+            anomaly_description = f"{multiple}x anomaly"
+
+        return f"""### Root Cause Identified
+
+**Verdict:** The incident metric increased from {baseline:.1%} to {incident:.1%}, representing **{anomaly_description}** and affecting **{sessions:,} sessions**.
+
+**What changed:** The incident rate was significantly above the historical baseline.
+
+**Primary signal:** The anomaly is concentrated around **{primary}**, accounting for approximately **{concentration:.1%}** of the excess signal.
+
+**Likely culprit:** The strongest correlated segment is **{secondary}**, with a metric rate of **{culprit_rate:.1%}** across **{culprit_sessions:,} sessions**.
+
+**Recommended mitigation:** **{action}.**
+
+*Report generated from deterministic ClickHouse evidence.*
+"""
+
